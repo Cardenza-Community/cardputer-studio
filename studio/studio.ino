@@ -3,6 +3,10 @@
 //  框架: LovyanGFX(屏) + I2C键盘(0x34) + ES8311(老式i2s 录+放) + SD
 //  录音用 I2S0(RX), 播放用 I2S1(TX); 都不依赖 M5Unified -> 麦克风能录!
 // =====================================================================
+#ifdef CARDENZA_TARGET
+#include "cardenza/cardenza_hal.h"
+#include <esp_heap_caps.h>
+#endif
 #include <Wire.h>
 #include <SPI.h>
 #include <SD.h>
@@ -15,6 +19,14 @@
 #include "seq.h"
 
 LGFX lcd;
+#ifdef CARDENZA_TARGET
+void cardenzaStudioRequire(bool ready,const char* message) {
+  if(ready)return;
+  Serial.printf("[Cardenza] %s; heap=%u\n",message,ESP.getFreeHeap());
+  lcd.fillScreen(0);lcd.setTextColor(0xf800);lcd.setCursor(4,4);lcd.print(message);
+  while(true)delay(100);
+}
+#endif
 CardputerKeyboard kb;
 ES8311Audio audio;
 SPIClass sdSPI(HSPI);            // SD 用独立 SPI3, 避开屏幕的 SPI2
@@ -79,7 +91,11 @@ bool loadWav(const char* path){
   if(dOff==0||dSz==0||bits!=16||ch<1||ch>2){ snprintf(loadDiag,48,"need 16-bit, this is %d-bit %dch",bits,ch); f.close();return false;}
   uint32_t fsz=f.size(); if(dOff+dSz>fsz)dSz=fsz-dOff;
   uint32_t frames=dSz/(2*ch); if(frames==0){ strcpy(loadDiag,"empty (0 samples)"); f.close();return false;}
+#ifdef CARDENZA_TARGET
+  sBuf=(int16_t*)heap_caps_malloc(frames*2,MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
+#else
   sBuf=(int16_t*)ps_malloc(frames*2); if(!sBuf)sBuf=(int16_t*)malloc(frames*2);
+#endif
   if(!sBuf){ snprintf(loadDiag,48,"OUT OF MEMORY (%lu KB)",(unsigned long)(frames*2/1024)); f.close();return false;}
   f.seek(dOff); static int16_t tmp[512*2]; uint32_t got=0;
   while(got<frames){ uint32_t want=frames-got; if(want>512)want=512;
@@ -140,12 +156,20 @@ void recStart(){
   i2s_config_t c={}; c.mode=(i2s_mode_t)(I2S_MODE_MASTER|I2S_MODE_RX);
   c.sample_rate=SR; c.bits_per_sample=I2S_BITS_PER_SAMPLE_16BIT;
   c.channel_format=I2S_CHANNEL_FMT_RIGHT_LEFT; c.communication_format=I2S_COMM_FORMAT_STAND_I2S;
+#ifdef CARDENZA_TARGET
+  c.mode=(i2s_mode_t)(I2S_MODE_MASTER|I2S_MODE_RX|I2S_MODE_PDM);
+  c.channel_format=I2S_CHANNEL_FMT_ONLY_RIGHT;
+  c.communication_format=I2S_COMM_FORMAT_STAND_PCM_SHORT;
+#endif
   c.intr_alloc_flags=ESP_INTR_FLAG_LEVEL1; c.dma_buf_count=8; c.dma_buf_len=128;
   c.use_apll=false; c.tx_desc_auto_clear=true; c.mclk_multiple=I2S_MCLK_MULTIPLE_256; c.bits_per_chan=I2S_BITS_PER_CHAN_16BIT;
   esp_err_t ie=i2s_driver_install(I2S_NUM_0,&c,0,NULL);
   if(ie!=ESP_OK){ snprintf(diag,sizeof(diag),"codec=%s i2s=ERR",codec?"OK":"NO"); strcpy(recMsg,"i2s install fail");
     if(recFile)recFile.close(); return; }   // 安装失败: 不进入录音状态
   i2s_pin_config_t p={}; p.mck_io_num=I2S_PIN_NO_CHANGE; p.bck_io_num=PIN_SCLK; p.ws_io_num=PIN_LRCK; p.data_out_num=I2S_PIN_NO_CHANGE; p.data_in_num=PIN_DIN;
+#ifdef CARDENZA_TARGET
+  p.bck_io_num=I2S_PIN_NO_CHANGE; p.ws_io_num=43; p.data_in_num=46;
+#endif
   i2s_set_pin(I2S_NUM_0,&p); i2s_zero_dma_buffer(I2S_NUM_0);
   // 丢弃几个缓冲并测峰值(看麦克风有没有数据)
   static int16_t dsc[256]; size_t br; int32_t pk=0;
@@ -158,9 +182,23 @@ void recStart(){
 void recPump(){
   static int16_t stx[256*2]; static int16_t mono[256]; size_t br=0;
   uint32_t maxFrames=(uint32_t)REC_MAX_SEC*SR;
+#ifdef CARDENZA_TARGET
+  i2s_read(I2S_NUM_0,stx,sizeof(mono),&br,20/portTICK_PERIOD_MS);
+#else
   i2s_read(I2S_NUM_0,stx,sizeof(stx),&br,20/portTICK_PERIOD_MS);
-  int got=br/4; int32_t pl=0,pr=0; int mn=0;
-  for(int i=0;i<got && recFrames<maxFrames;i++){ int16_t L=stx[i*2], R=stx[i*2+1];
+#endif
+#ifdef CARDENZA_TARGET
+  int got=min((int)(br/2),256); // mono buffer below holds 256 samples
+#else
+  int got=br/4;
+#endif
+  int32_t pl=0,pr=0; int mn=0;
+  for(int i=0;i<got && recFrames<maxFrames;i++){
+#ifdef CARDENZA_TARGET
+    int16_t L=stx[i], R=L;
+#else
+    int16_t L=stx[i*2], R=stx[i*2+1];
+#endif
     int32_t al=L<0?-L:L, ar=R<0?-R:R; if(al>pl)pl=al; if(ar>pr)pr=ar;
     int32_t s=(ar>=al)?R:L; s*=REC_GAIN;                 // 软件增益
     if(s>32767)s=32767; else if(s<-32768)s=-32768;       // 削波保护
@@ -364,8 +402,17 @@ void drawSongs(){
 
 void setup(){
   Serial.begin(115200);
+#ifdef CARDENZA_TARGET
+  const bool codecReady = cardenza_hal_init(32,16);
+  Wire.begin(2,1,400000);
+#else
   Wire.begin(8,9,400000);
+#endif
   lcd.init(); lcd.setRotation(1);
+#ifdef CARDENZA_TARGET
+  Serial.printf("[Cardenza] STUDIO ES8156 %s; GPIO matrix/PDM mic; no PSRAM/gyro/battery/LED\n",codecReady?"ready":"FAILED");
+  if (!codecReady) { lcd.fillScreen(0); lcd.setTextColor(0xf800); lcd.print("ES8156 INIT FAILED"); while(true)delay(100); }
+#endif
   // 复古暖米色主题(与合成器统一)
   BG=lcd.color565(233,227,214); INK=lcd.color565(74,70,62); GREY=lcd.color565(150,144,130);
   ACC=lcd.color565(218,108,40); HL=lcd.color565(188,108,80); RED=lcd.color565(196,72,56);

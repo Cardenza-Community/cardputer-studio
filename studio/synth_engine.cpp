@@ -5,6 +5,9 @@
 #include "synth_engine.h"
 
 extern ES8311Audio audio;
+#ifdef CARDENZA_TARGET
+extern void cardenzaStudioRequire(bool ready,const char* message);
+#endif
 
 #define PIN_SCLK 41
 #define PIN_LRCK 43
@@ -185,11 +188,24 @@ void seBegin(uint32_t sampleRate){
   c.channel_format=I2S_CHANNEL_FMT_RIGHT_LEFT; c.communication_format=I2S_COMM_FORMAT_STAND_I2S;
   c.intr_alloc_flags=ESP_INTR_FLAG_LEVEL1; c.dma_buf_count=6; c.dma_buf_len=128;
   c.use_apll=false; c.tx_desc_auto_clear=true; c.mclk_multiple=I2S_MCLK_MULTIPLE_256; c.bits_per_chan=I2S_BITS_PER_CHAN_16BIT;
+#ifdef CARDENZA_TARGET
+  cardenzaStudioRequire(i2s_driver_install(I2S_NUM_1,&c,0,NULL)==ESP_OK,"I2S TX init FAILED");
+#else
   i2s_driver_install(I2S_NUM_1,&c,0,NULL);
+#endif
   i2s_pin_config_t p={}; p.mck_io_num=I2S_PIN_NO_CHANGE; p.bck_io_num=PIN_SCLK; p.ws_io_num=PIN_LRCK; p.data_out_num=PIN_DOUT; p.data_in_num=I2S_PIN_NO_CHANGE;
-  i2s_set_pin(I2S_NUM_1,&p); i2s_zero_dma_buffer(I2S_NUM_1);
+#ifdef CARDENZA_TARGET
+  cardenzaStudioRequire(i2s_set_pin(I2S_NUM_1,&p)==ESP_OK,"I2S pins init FAILED");
+#else
+  i2s_set_pin(I2S_NUM_1,&p);
+#endif
+  i2s_zero_dma_buffer(I2S_NUM_1);
   running=true;
+#ifdef CARDENZA_TARGET
+  cardenzaStudioRequire(xTaskCreatePinnedToCore(audioTask,"synth",4096,NULL,5,&taskH,0)==pdPASS,"Synth task init FAILED");
+#else
   xTaskCreatePinnedToCore(audioTask,"synth",4096,NULL,5,&taskH,0);
+#endif
 }
 void seEnd(){ running=false; delay(40); fxBuf=NULL; fxLen=0; i2s_driver_uninstall(I2S_NUM_1); }
 

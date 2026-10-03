@@ -33,6 +33,14 @@ CardputerKeyboard::CardputerKeyboard() {
 }
 
 void CardputerKeyboard::begin(TwoWire* wire, uint8_t addr) {
+#ifdef CARDENZA_TARGET
+    (void)wire; (void)addr;
+    const int select[]={8,9,11}, inputs[]={13,15,3,4,5,6,7};
+    for (int pin:select) { pinMode(pin,OUTPUT); digitalWrite(pin,LOW); }
+    for (int pin:inputs) pinMode(pin,INPUT_PULLUP);
+    Serial.println("[Cardenza] GPIO matrix keyboard initialized");
+#else
+
     _wire = wire;
     _addr = addr;
     // Wire.begin() is NOT called here — caller owns the bus
@@ -58,9 +66,32 @@ void CardputerKeyboard::begin(TwoWire* wire, uint8_t addr) {
     }
 
     Serial.println("TCA8418 keyboard initialized");
+
+#endif
 }
 
 void CardputerKeyboard::update() {
+#ifdef CARDENZA_TARGET
+    // Matrix coordinate scan follows M5Cardputer (MIT), Copyright 2025 M5Stack Technology CO LTD.
+    static const char* const names[4][14]={
+      {"`","1","2","3","4","5","6","7","8","9","0","-","=","del"},
+      {"tab","q","w","e","r","t","y","u","i","o","p","[","]","\\"},
+      {"fn","shift","a","s","d","f","g","h","j","k","l",";","'","ok"},
+      {"ctrl","opt","alt","z","x","c","v","b","n","m",",",".","/","space"}};
+    const int select[]={8,9,11}, inputs[]={13,15,3,4,5,6,7};
+    memcpy(_prevState,_currState,sizeof(_currState));
+    memset(_currState,0,sizeof(_currState));
+    for (int mux=0;mux<8;mux++) {
+      for (int bit=0;bit<3;bit++) digitalWrite(select[bit],(mux>>bit)&1);
+      delayMicroseconds(10);
+      for (int col=0;col<7;col++) if (!digitalRead(inputs[col])) {
+        int x=2*col+(mux>3?0:1), y=3-(mux&3);
+        int code=keyNameToCode(names[y][x]);
+        if(code>=0 && code<MAX_KEYS)_currState[code]=1;
+      }
+    }
+#else
+
     memcpy(_prevState, _currState, sizeof(_currState));
 
     uint8_t evCount = readReg(TCA8418_REG_KEY_LCK_EC) & 0x0F;
@@ -78,6 +109,8 @@ void CardputerKeyboard::update() {
     }
 
     writeReg(TCA8418_REG_INT_STAT, 0x0F);
+
+#endif
 }
 
 bool CardputerKeyboard::wasPressed(const char* key) {
