@@ -1,5 +1,6 @@
 #include "ES8311Audio.h"
 #include <Wire.h>
+#include <math.h>
 #include <driver/i2s.h>
 
 ES8311Audio::ES8311Audio() {
@@ -14,8 +15,15 @@ ES8311Audio::ES8311Audio() {
 
 void ES8311Audio::begin(TwoWire* wire) {
     _wire = wire;
+#ifdef CARDENZA_TARGET
+    _addr = 0x08;
+#endif
     delay(50);
+#ifdef CARDENZA_TARGET
+    Serial.println("[Cardenza] ES8156 I2C initialized");
+#else
     Serial.println("ES8311 I2C initialized");
+#endif
 }
 
 // ============================================================
@@ -23,6 +31,15 @@ void ES8311Audio::begin(TwoWire* wire) {
 // ============================================================
 
 void ES8311Audio::enableSpeaker() {
+#ifdef CARDENZA_TARGET
+    writeReg(0x11, 0x30); // Philips 16-bit, 32 BCLK/frame
+    writeReg(0x01, 0xe1); // slave, derive clock from BCLK
+    writeReg(0x04, 0x20);
+    writeReg(0x05, 0x01);
+    mute(false);
+    setVolume(_volume);
+#else
+
     writeReg(0x00, 0x80);  // CSM_ON
     writeReg(0x01, 0xB5);  // MCLK=BCLK, BCLK on, DAC clk on
     writeReg(0x02, 0x18);  // MULT_PRE=3
@@ -35,9 +52,15 @@ void ES8311Audio::enableSpeaker() {
     writeReg(0x37, 0x08);  // DAC_RAMPRATE=0 (disabled), DAC_EQBYPASS=1
     applyDrc();
     delay(50);
+
+#endif
 }
 
 void ES8311Audio::enableMicrophone() {
+#ifdef CARDENZA_TARGET
+    mute(true); // Capture uses the separate original Cardputer PDM microphone.
+#else
+
     writeReg(0x00, 0x80);  // CSM_ON
     writeReg(0x01, 0xBA);  // MCLK=BCLK, BCLK on, ADC clk on
     writeReg(0x02, 0x18);  // MULT_PRE=3
@@ -66,6 +89,8 @@ void ES8311Audio::enableMicrophone() {
     // Matches M5Unified default. HPFS2 must NOT be 0 (kills bass).
     writeReg(0x1C, 0x7F);
     delay(50);
+
+#endif
 }
 
 void ES8311Audio::enableMicForStream() { enableMicrophone(); }
@@ -77,6 +102,13 @@ void ES8311Audio::enableSpkForStream() { enableSpeaker(); }
 // ============================================================
 
 void ES8311Audio::setVolume(uint8_t volume) {
+#ifdef CARDENZA_TARGET
+    _volume = min((uint8_t)100, volume);
+    int value = _volume ? 191 + (int)lroundf(40.0f * log10f(_volume / 100.0f)) : 0;
+    writeReg(0x14, (uint8_t)max(0, min(191, value))); // never exceed 0 dB
+
+#else
+
     if (volume > 100) volume = 100;
     _volume = volume;
     uint8_t regValue;
@@ -89,6 +121,8 @@ void ES8311Audio::setVolume(uint8_t volume) {
     }
     writeReg(0x32, regValue);
     Serial.printf("DAC vol: %d%% (reg32=0x%02X)\n", volume, regValue);
+
+#endif
 }
 
 // ============================================================
@@ -96,10 +130,16 @@ void ES8311Audio::setVolume(uint8_t volume) {
 // ============================================================
 
 void ES8311Audio::setMicGain(uint8_t gain) {
+#ifdef CARDENZA_TARGET
+    (void)gain; // ES8156 has no ADC/PGA; PDM gain is separate.
+#else
+
     if (gain > 10) gain = 10;
     _micGain = gain;
     writeReg(0x14, 0x10 | gain);  // LINSEL=1 always
     Serial.printf("Mic PGA: %ddB\n", gain * 3);
+
+#endif
 }
 
 // ============================================================
@@ -111,6 +151,10 @@ void ES8311Audio::setMicGain(uint8_t gain) {
 // ============================================================
 
 void ES8311Audio::applyAdcGain() {
+#ifdef CARDENZA_TARGET
+    return; // ES8311-specific hardware effect is unavailable.
+#else
+
     // When ALC is active, reg 0x17 = MAXGAIN (set by applyAlc).
     // Do NOT overwrite it here — ALC controls the gain.
     if (_alcMode != ALC_OFF) {
@@ -120,6 +164,8 @@ void ES8311Audio::applyAdcGain() {
     // Fixed 0dB — no user-adjustable digital boost on recording path
     writeReg(0x17, 0xBF);
     Serial.println("ADC vol reg17=0xBF (0dB)");
+
+#endif
 }
 
 // ============================================================
@@ -162,15 +208,25 @@ void ES8311Audio::cycleAlc() {
 }
 
 void ES8311Audio::getAlcLabel(char* buf, int sz) {
+#ifdef CARDENZA_TARGET
+    snprintf(buf, sz, "N/A");
+#else
+
     switch (_alcMode) {
         case ALC_OFF:  snprintf(buf, sz, "OFF");  break;
         case ALC_LOW:  snprintf(buf, sz, "Low");  break;
         case ALC_MID:  snprintf(buf, sz, "Mid");  break;
         case ALC_HIGH: snprintf(buf, sz, "High"); break;
     }
+
+#endif
 }
 
 void ES8311Audio::applyAlc() {
+#ifdef CARDENZA_TARGET
+    return; // ES8311-specific hardware effect is unavailable.
+#else
+
     if (_alcMode == ALC_OFF) {
         writeReg(0x18, 0x00);  // ALC_EN=0, AUTOMUTE=0, WINSIZE=0
         writeReg(0x19, 0x00);  // Clear level settings
@@ -234,6 +290,8 @@ void ES8311Audio::applyAlc() {
 
     Serial.printf("ALC regs: 15=0x%02X 18=0x%02X 19=0x%02X 17=0x%02X(maxgain)\n",
                   (rampRate & 0x0F) << 4, r18, r19, maxGain);
+
+#endif
 }
 
 // ============================================================
@@ -274,6 +332,10 @@ void ES8311Audio::cycleDrc() {
 }
 
 void ES8311Audio::getDrcLabel(char* buf, int sz) {
+#ifdef CARDENZA_TARGET
+    snprintf(buf, sz, "N/A");
+#else
+
     switch (_drcMode) {
         case DRC_OFF:   snprintf(buf, sz, "OFF");   break;
         case DRC_MED:   snprintf(buf, sz, "Med");   break;
@@ -281,9 +343,15 @@ void ES8311Audio::getDrcLabel(char* buf, int sz) {
         case DRC_CRUSH: snprintf(buf, sz, "Crush"); break;
         case DRC_NUKE:  snprintf(buf, sz, "NUKE");  break;
     }
+
+#endif
 }
 
 void ES8311Audio::applyDrc() {
+#ifdef CARDENZA_TARGET
+    return; // ES8311-specific hardware effect is unavailable.
+#else
+
     writeReg(0x33, 0x00);  // DAC_OFFSET = 0 (this is NOT DRC!)
 
     if (_drcMode == DRC_OFF) {
@@ -334,6 +402,8 @@ void ES8311Audio::applyDrc() {
     writeReg(0x34, r34);
     writeReg(0x35, r35);
     Serial.printf("DRC regs: 34=0x%02X 35=0x%02X\n", r34, r35);
+
+#endif
 }
 
 // ============================================================
@@ -341,14 +411,26 @@ void ES8311Audio::applyDrc() {
 // ============================================================
 
 void ES8311Audio::mute(bool enable) {
+#ifdef CARDENZA_TARGET
+    writeReg(0x13, enable ? 0x06 : 0x00);
+#else
+
     writeReg(0x31, enable ? 0x20 : 0x00);
+
+#endif
 }
 
 bool ES8311Audio::testConnection() {
+#ifdef CARDENZA_TARGET
+    return readReg(0xfd)==0x81 && readReg(0xfe)==0x55 && readReg(0xff)==0x11;
+#else
+
     uint8_t id1 = readReg(0xFD);
     uint8_t id2 = readReg(0xFE);
     Serial.printf("ES8311 ID: 0x%02X 0x%02X (expect 0x83 0x11)\n", id1, id2);
     return (id1 == 0x83 && id2 == 0x11);
+
+#endif
 }
 
 // ============================================================
@@ -357,6 +439,9 @@ bool ES8311Audio::testConnection() {
 
 int32_t ES8311Audio::recordToBuffer(int16_t* buffer, int32_t maxSamples,
                                     uint32_t sampleRate) {
+#ifdef CARDENZA_TARGET
+    i2s_driver_uninstall(I2S_NUM_1); // GPIO43 is shared by PDM clock and DAC LRCK.
+#endif
     enableMicrophone();
     const i2s_port_t PORT = I2S_NUM_0;
 
@@ -366,6 +451,11 @@ int32_t ES8311Audio::recordToBuffer(int16_t* buffer, int32_t maxSamples,
     cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
     cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
     cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+#ifdef CARDENZA_TARGET
+    cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM);
+    cfg.channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT;
+    cfg.communication_format = I2S_COMM_FORMAT_STAND_PCM_SHORT;
+#endif
     cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
     cfg.dma_buf_count = 8;
     cfg.dma_buf_len = 128;
@@ -380,6 +470,11 @@ int32_t ES8311Audio::recordToBuffer(int16_t* buffer, int32_t maxSamples,
     pins.ws_io_num  = PIN_I2S_LRCK;
     pins.data_out_num = I2S_PIN_NO_CHANGE;
     pins.data_in_num = PIN_I2S_DIN;
+#ifdef CARDENZA_TARGET
+    pins.bck_io_num = I2S_PIN_NO_CHANGE;
+    pins.ws_io_num = 43;
+    pins.data_in_num = 46;
+#endif
 
     if (i2s_driver_install(PORT, &cfg, 0, NULL) != ESP_OK) return -1;
     i2s_set_pin(PORT, &pins);
@@ -398,8 +493,13 @@ int32_t ES8311Audio::recordToBuffer(int16_t* buffer, int32_t maxSamples,
     while (_recording && n < maxSamples) {
         int want = min(RF, (int)(maxSamples - n));
         i2s_read(PORT, stereo, want * 4, &br, portMAX_DELAY);
+#ifdef CARDENZA_TARGET
+        int got = br / 2;
+        for (int i = 0; i < got && n < maxSamples; i++) buffer[n++] = stereo[i];
+#else
         int got = br / 4;
         for (int i = 0; i < got && n < maxSamples; i++) buffer[n++] = stereo[i * 2 + 1];
+#endif
     }
 
     _recording = false;
